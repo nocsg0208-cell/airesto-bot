@@ -17,10 +17,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: |
-          pip install requests pytz playwright
-          playwright install chromium
-          playwright install-deps chromium
+        run: pip install requests pytz
 
       - name: Run script
         run: python main.py
