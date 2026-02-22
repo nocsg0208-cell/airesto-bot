@@ -1,0 +1,26 @@
+name: Send Bookings to Telegram
+
+on:
+  schedule:
+    - cron: '0 0 * * *'   # 10:00 Vladivostok (UTC+10 = 00:00 UTC)
+    - cron: '0 7 * * *'   # 17:00 Vladivostok (UTC+10 = 07:00 UTC)
+  workflow_dispatch:       # manual run button
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install requests pytz playwright
+          playwright install chromium
+          playwright install-deps chromium
+
+      - name: Run script
+        run: python main.py
