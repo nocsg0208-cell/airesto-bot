@@ -1,185 +1,152 @@
 import requests
 from datetime import datetime
 import pytz
-import re
-from playwright.sync_api import sync_playwright
 
 BOT_TOKEN = "8080204943:AAHsR-QnuxS520DlaqN7IhVbgvCFzKuuTzE"
 CHAT_ID = "-1001573667863"
 
 RESTAURANTS = [
-    {"name": "Супра Диди",   "id": "111112"},
     {"name": "Супра Меоре",  "id": "111114"},
+    {"name": "Супра Диди",   "id": "111112"},
     {"name": "Супра Романи", "id": "111113"},
 ]
 
 EMAIL = "kren.irina@csg.ru"
 PASSWORD = "Tornado9451!"
 
+BASE_URL = "https://app.airesto.ru"
 
-def get_date_str():
+
+def get_today_str():
     tz = pytz.timezone("Asia/Vladivostok")
-    today = datetime.now(tz)
-    months = ["января","февраля","марта","апреля","мая","июня",
-              "июля","августа","сентября","октября","ноября","декабря"]
-    return f"{today.day} {months[today.month-1]}"
+    now = datetime.now(tz)
+    return now.strftime("%Y-%m-%d"), now.strftime("%d %B %Y")
 
 
-def login_playwright(page):
-    """Login to Airesto with increased timeouts and multiple selector fallbacks"""
-    page.goto("https://app.airesto.ru/login", wait_until="domcontentloaded", timeout=30000)
-    page.wait_for_timeout(3000)
+def login():
+    session = requests.Session()
+    session.headers.update({
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0",
+    })
+    resp = session.post(
+        f"{BASE_URL}/api/v1/auth/login",
+        json={"email": EMAIL, "password": PASSWORD},
+        timeout=30,
+    )
+    if resp.status_code == 200:
+        data = resp.json()
+        token = data.get("token") or data.get("access_token") or data.get("data", {}).get("token")
+        if token:
+            session.headers.update({"Authorization": f"Bearer {token}"})
+            return session
+    # fallback: try form login
+    resp2 = session.post(
+        f"{BASE_URL}/api/v1/auth/signin",
+        json={"email": EMAIL, "password": PASSWORD},
+        timeout=30,
+    )
+    if resp2.status_code == 200:
+        data2 = resp2.json()
+        token = data2.get("token") or data2.get("access_token") or data2.get("data", {}).get("token")
+        if token:
+            session.headers.update({"Authorization": f"Bearer {token}"})
+    return session
 
-    # Try multiple selectors for email field
-    email_selectors = [
-        'input[type="email"]',
-        'input[name="email"]',
-        'input[placeholder*="mail"]',
-        'input[placeholder*="логин"]',
-        'input[placeholder*="Login"]',
-        'form input:first-of-type',
+
+def get_bookings(session, restaurant_id, date_str):
+    """Try multiple API endpoints to get bookings for today."""
+    endpoints = [
+        f"{BASE_URL}/api/v1/restaurant/{restaurant_id}/booking/list?date={date_str}",
+        f"{BASE_URL}/api/v1/restaurant/{restaurant_id}/bookings?date={date_str}",
+        f"{BASE_URL}/api/v1/booking/list?restaurant_id={restaurant_id}&date={date_str}",
     ]
-    email_filled = False
-    for sel in email_selectors:
+    for url in endpoints:
         try:
-            page.wait_for_selector(sel, timeout=5000, state="visible")
-            page.fill(sel, EMAIL)
-            email_filled = True
-            break
-        except:
+            resp = session.get(url, timeout=30)
+            if resp.status_code == 200:
+                data = resp.json()
+                # unwrap data
+                if isinstance(data, dict):
+                    items = data.get("data") or data.get("bookings") or data.get("items") or []
+                elif isinstance(data, list):
+                    items = data
+                else:
+                    items = []
+                if items:
+                    return items
+        except Exception:
             continue
-
-    if not email_filled:
-        # Last resort: fill all text inputs
-        inputs = page.query_selector_all('input')
-        for inp in inputs:
-            t = inp.get_attribute('type') or 'text'
-            if t in ('email', 'text', ''):
-                inp.fill(EMAIL)
-                break
-
-    page.wait_for_timeout(500)
-
-    # Password field
-    pwd_selectors = [
-        'input[type="password"]',
-        'input[name="password"]',
-        'input[placeholder*="парол"]',
-    ]
-    for sel in pwd_selectors:
-        try:
-            page.fill(sel, PASSWORD)
-            break
-        except:
-            continue
-
-    page.wait_for_timeout(500)
-
-    # Click login button
-    btn_selectors = [
-        'button[type="submit"]',
-        'button:has-text("Войти")',
-        'button:has-text("Login")',
-        'input[type="submit"]',
-    ]
-    for sel in btn_selectors:
-        try:
-            page.click(sel, timeout=3000)
-            break
-        except:
-            continue
-
-    # Wait for redirect after login
-    page.wait_for_url("**airesto.ru/restaurant**", timeout=20000)
-    page.wait_for_timeout(2000)
+    return []
 
 
-def take_screenshot_and_get_data(restaurant_id):
-    screenshot_path = f"/tmp/screen_{restaurant_id}.png"
-    hours_data = {}
-
-    with sync_playwright() as p:
-        browser = p.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
-        page = browser.new_page(viewport={"width": 1400, "height": 900})
-
-        login_playwright(page)
-
-        page.goto(
-            f"https://app.airesto.ru/restaurant/{restaurant_id}/booking/list",
-            wait_until="domcontentloaded",
-            timeout=20000
+def format_bookings(bookings, date_label):
+    """Group bookings by time slot, output text."""
+    from collections import defaultdict
+    slots = defaultdict(list)
+    for b in bookings:
+        # extract time — try common field names
+        time_val = (
+            b.get("time") or b.get("booking_time") or
+            b.get("start_time") or b.get("datetime") or
+            b.get("date") or ""
         )
-        page.wait_for_timeout(3000)
-
-        # Click "Все" to show all bookings
+        # extract guests count
+        guests = (
+            b.get("guests") or b.get("persons") or
+            b.get("guest_count") or b.get("count") or 0
+        )
+        # parse time to HH:MM
         try:
-            page.locator('text=Все').first.click(timeout=3000)
-            page.wait_for_timeout(1000)
-        except:
-            pass
+            if "T" in str(time_val):
+                t = datetime.fromisoformat(str(time_val).replace("Z", "+00:00"))
+                tz = pytz.timezone("Asia/Vladivostok")
+                t = t.astimezone(tz)
+                slot_key = t.strftime("%H:%M")
+            elif ":" in str(time_val):
+                slot_key = str(time_val)[:5]
+            else:
+                slot_key = "??"
+        except Exception:
+            slot_key = "??"
+        slots[slot_key].append(int(guests))
 
-        # Parse hours data
-        content = page.inner_text('body')
-        pattern = r'(\d{2}:\d{2})\s+(\d+)\s*чел\s+(\d+)\s*штк'
-        matches = re.findall(pattern, content)
-        for hour, people, count in matches:
-            hours_data[hour] = {"people": int(people), "count": int(count)}
+    if not slots:
+        return None
 
-        # Screenshot of the table area
-        try:
-            page.screenshot(path=screenshot_path, clip={
-                "x": 260, "y": 160, "width": 1130, "height": 320
-            })
-        except:
-            page.screenshot(path=screenshot_path)
-
-        browser.close()
-
-    return screenshot_path, hours_data
-
-
-def build_message(restaurant_name, hours_data):
-    date_str = get_date_str()
-    lines = [f"\U0001f4ca <b>{date_str}. {restaurant_name}. Бронирования</b>\n"]
-    for hour in sorted(hours_data.keys()):
-        p = hours_data[hour]["people"]
-        c = hours_data[hour]["count"]
-        if c == 1:
-            word = "бронь"
-        elif 2 <= c <= 4:
-            word = "брони"
-        else:
-            word = "броней"
-        lines.append(f"С {hour} \u2014 {p} чел; {c} {word}")
+    lines = [date_label, "Бронирования"]
+    for slot in sorted(slots.keys()):
+        total_guests = sum(slots[slot])
+        count = len(slots[slot])
+        noun = "бронь" if count == 1 else ("брони" if 2 <= count <= 4 else "броней")
+        lines.append(f"С {slot} — {total_guests} чел; {count} {noun}")
     return "\n".join(lines)
 
 
-def send_photo(photo_path, caption):
-    with open(photo_path, "rb") as f:
-        requests.post(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto",
-            data={"chat_id": CHAT_ID, "caption": caption, "parse_mode": "HTML"},
-            files={"photo": f}
-        )
-
-
-def send_message(text):
-    requests.post(
-        f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-        json={"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML"}
-    )
+def send_telegram(text):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    resp = requests.post(url, json={"chat_id": CHAT_ID, "text": text}, timeout=30)
+    return resp.status_code == 200
 
 
 def main():
+    date_str, date_label = get_today_str()
+    session = login()
+
     for rest in RESTAURANTS:
-        try:
-            screenshot, hours_data = take_screenshot_and_get_data(rest["id"])
-            message = build_message(rest["name"], hours_data)
-            send_photo(screenshot, message)
-            print(f"OK: {rest['name']}")
-        except Exception as e:
-            send_message(f"\u26a0\ufe0f Ошибка {rest['name']}: {e}")
-            print(f"ERROR {rest['name']}: {e}")
+        bookings = get_bookings(session, rest["id"], date_str)
+        if bookings:
+            text = format_bookings(bookings, date_label)
+            if text:
+                msg = f"{rest['name']}\n{text}"
+            else:
+                msg = f"{rest['name']}\n{date_label}\nНет бронирований"
+        else:
+            msg = f"{rest['name']}\n{date_label}\nНет бронирований (или ошибка API)"
+        send_telegram(msg)
+        print(msg)
+        print("---")
 
 
 if __name__ == "__main__":
